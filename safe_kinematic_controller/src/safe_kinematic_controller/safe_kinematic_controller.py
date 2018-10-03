@@ -232,13 +232,28 @@ class Controller(object):
             elif controller_state.mode == ControllerMode.CARTESIAN_TELEOP:
                 if controller_state.joystick_command is not None \
                   and controller_state.joystick_command.spatial_velocity_command is not None:
-                    J = rox.robotjacobian(self._robot, controller_state.joint_position)
-                    joints_vel = np.linalg.pinv(J).dot(controller_state.joystick_command.spatial_velocity_command)
-                    joints_vel = np.clip(joints_vel, -self._max_joint_vel, self._max_joint_vel)
-                    controller_state.joint_setpoint += joints_vel.dot(step_ts)
-                    self._clip_joint_angles(controller_state)
+                    self._compute_joint_vel_from_spatial_vel(controller_state, step_ts, controller_state.joystick_command.spatial_velocity_command)                    
             elif controller_state.mode == ControllerMode.CYLINDRICAL_TELEOP:
-                pass
+                if controller_state.joystick_command is not None \
+                  and controller_state.joystick_command.spatial_velocity_command is not None:
+                    if (not all(self._robot.H[:,0] == (0,0,1)) or self._robot.joint_type[0] != 0):
+                        controller_state.mode = ControllerMode.INVALID_OPERATION
+                    else:
+                        cmd_vel = controller_state.joystick_command.spatial_velocity_command
+                        transform_0T = rox.fwdkin(self._robot, controller_state.joint_position)
+                        d = np.linalg.norm((transform_0T.p[0], transform_0T.p[1]))
+                        theta = np.arctan2(transform_0T.p[1], transform_0T.p[0])
+                        s_0 = transform_0T.p[1] / d
+                        c_0 = transform_0T.p[0] / d
+                        v_x = -d*s_0*cmd_vel[3] + c_0*cmd_vel[4]
+                        v_y =  d*c_0*cmd_vel[3] + s_0*cmd_vel[4]
+                        v_z = cmd_vel[5]
+                        w_x = cmd_vel[0]
+                        w_y = cmd_vel[1]
+                        w_z = cmd_vel[2] + cmd_vel[3]
+                        cmd_vel2 = np.array([w_x, w_y, w_z, v_x, v_y, v_z])               
+                        self._compute_joint_vel_from_spatial_vel(controller_state, step_ts, cmd_vel2)
+                
             elif controller_state.mode == ControllerMode.SPHERICAL_TELEOP:
                 pass
             elif controller_state.mode == ControllerMode.SHARED_TRAJECTORY:
@@ -283,6 +298,15 @@ class Controller(object):
         
         controller_state.mode = ControllerMode.INVALID_ARGUMENT
         return controller_state.mode    
+    
+    def _compute_joint_vel_from_spatial_vel(self, controller_state, step_ts, vel):
+        J = rox.robotjacobian(self._robot, controller_state.joint_position)
+        joints_vel = np.linalg.pinv(J).dot(vel)
+        joints_vel = np.clip(joints_vel, -self._max_joint_vel, self._max_joint_vel)
+        controller_state.joint_setpoint += joints_vel.dot(step_ts)
+        self._clip_joint_angles(controller_state)        
+        return ControllerMode.SUCCESS
+        
     
     def set_mode(self, mode):
         with self._lock:
@@ -364,6 +388,9 @@ class Controller(object):
             controller_state.joint_setpoint = np.clip(controller_state.joint_setpoint, \
                 self._robot.joint_lower_limit, self._robot.joint_upper_limit, \
                 controller_state.joint_setpoint)
+            controller_state.joint_command = np.clip(controller_state.joint_command, \
+                self._robot.joint_lower_limit, self._robot.joint_upper_limit, \
+                controller_state.joint_command)
       
     def _publish_state(self, state):
         pass
