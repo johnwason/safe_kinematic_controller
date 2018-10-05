@@ -5,6 +5,7 @@ from .safe_kinematic_controller import Controller, ControllerMode, JoystickComma
     JointTrajectoryWaypoint, JointTrajectoryTolerance
 
 from sensor_msgs.msg import Joy, JointState
+from geometry_msgs.msg import WrenchStamped
 import rospy
 import numpy as np
 import threading
@@ -130,6 +131,9 @@ class ROSController(Controller):
         self._publish_state_publisher = None
         
         self._joint_states_position = np.full((len(self._robot.joint_type),), np.nan)
+        self._ft_wrench = None
+        self._external_setpoint = [None]*8
+        
         
         self._init_read_robot_state()
         self._init_write_robot_state()
@@ -154,11 +158,25 @@ class ROSController(Controller):
             pub = rospy.Publisher(j + "_position_controller/command", Float64, queue_size=10)
             self._joint_command_publishers.append(pub)
     
+    def _ft_wrench_cb(self, ft_wrench):
+        #TODO: Add reading timeout?
+        with self._lock:
+            t = ft_wrench.wrench.torque
+            f = ft_wrench.wrench.force
+            self._ft_wrench = np.array([t.x, t.y, t.z, f.x, f.y, f.z])
+    
     def _init_read_ft_sensor(self):
-        pass
+        self._ft_wrench_subscriber = rospy.Subscriber("ft_wrench", WrenchStamped, self._ft_wrench_cb)
+    
+    def _external_setpoint_cb(self, i, joint_setpoint):
+        if joint_setpoint.names == self._robot.joint_names and len(joint_setpoint.position) == len(self._robot.joint_names):
+            with self._lock:
+                self._external_setpoint[i] = joint_setpoint.position
     
     def _init_read_external_setpoints(self):
-        pass
+        self._external_setpoint_subscribers=[]
+        for i in xrange(8):
+            sub = rospy.Subscriber("external_setpoint_%d" % i, safe_kinematic_controller_msg.JointSetpoint, lambda msg,i=i: self._external_setpoint_cb(i, msg))
         
     def _init_publish_state(self):
         self._publish_state_publisher = rospy.Publisher("controller_state", safe_kinematic_controller_msg.ControllerState, queue_size=10)
@@ -177,6 +195,17 @@ class ROSController(Controller):
     def read_joystick_command(self):
         return self._joystick_adapter.read_joystick_command()
     
+    def read_ft_wrench(self):
+        if self._ft_wrench is None:
+            return ControllerMode.SENSOR_COMMUNICATION_ERROR, None
+        return ControllerMode.SUCCESS, self._ft_wrench
+    
+    def read_external_setpoint(self, index):
+        setpoint = self._external_setpoint[index]
+        if setpoint is None:
+            return ControllerMode.INVALID_EXTERNAL_SETPOINT, None
+        return ControllerMode.SUCCESS, setpoint
+    
     def _publish_state(self, state):
         
         def vector2wrench(v):
@@ -193,6 +222,7 @@ class ROSController(Controller):
             s.joint_setpoint_position = list(state.joint_setpoint) if state.joint_setpoint is not None else []
             s.joint_command_position = list(state.joint_command) if state.joint_command is not None else []
             s.ft_wrench = vector2wrench(state.ft_wrench)
+            s.ft_wrench_valid = state.ft_wrench_status.value > 0
             s.ft_wrench_bias = vector2wrench(state.ft_wrench_bias)
             if state.active_trajectory is not None:
                 s.trajectory_valid = True
@@ -212,7 +242,7 @@ class ROSController(Controller):
             ft_bias = []
             if len(req.ft_stop_threshold) != 0:
                 ft_threshold = np.array(req.ft_stop_threshold)
-                if (len(req.ft_threshold) != 6 or np.any(ft_threshold < 0)):
+                if (len(ft_threshold) != 6 or np.any(ft_threshold < 0)):
                     res.error_code.mode = ControllerMode.INVALID_ARGUMENT.value
                     return res
             
@@ -222,10 +252,23 @@ class ROSController(Controller):
                     res.error_code.mode = ControllerMode.INVALID_ARGUMENT.value
                     return res
             
-            self._set_mode(ControllerMode(req.mode.mode))
-            self._set_speed_scalar(req.speed_scalar)
-            self._set_ft_wrench_threshold(ft_threshold)
-            self._set_ft_wrench_bias(ft_bias)
+            ret = self._set_mode(ControllerMode(req.mode.mode))
+            if (ret.value < 0):
+                res.error_code.mode=ret.value
+                return res
+            
+            ret = self._set_speed_scalar(req.speed_scalar)
+            if (ret.value < 0):
+                res.error_code.mode=ret.value
+                return res
+            ret = self._set_ft_wrench_threshold(ft_threshold)
+            if (ret.value < 0):
+                res.error_code.mode=ret.value
+                return res            
+            ret = self._set_ft_wrench_bias(ft_bias)
+            if (ret.value < 0):
+                res.error_code.mode=ret.value
+                return res
             
             res.error_code.mode=ControllerMode.SUCCESS.value
                         

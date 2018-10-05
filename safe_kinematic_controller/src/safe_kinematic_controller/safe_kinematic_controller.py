@@ -214,8 +214,8 @@ class Controller(object):
                 controller_state.active_trajectory.abort(ControllerMode.FT_THRESHOLD_VIOLATION, \
                                                          "Force/Torque Threshold Violated")
                 controller_state.active_trajectory = None
-                controller_state.mode = ControllerMode.FT_THRESHOLD_VIOLATION
-                return ControllerMode.FT_THRESHOLD_VIOLATION
+            controller_state.mode = ControllerMode.FT_THRESHOLD_VIOLATION
+            return ControllerMode.FT_THRESHOLD_VIOLATION
         try:
             if controller_state.mode == ControllerMode.HALT:
                 pass
@@ -257,7 +257,14 @@ class Controller(object):
             elif controller_state.mode == ControllerMode.SPHERICAL_TELEOP:
                 pass
             elif controller_state.mode == ControllerMode.SHARED_TRAJECTORY:
-                pass
+                if controller_state.joystick_command is not None \
+                  and controller_state.joystick_command.trajectory_velocity_command is not None:
+                    active_trajectory = controller_state.active_trajectory
+                    if active_trajectory is not None and active_trajectory.trajectory_valid:
+                        res, setpoint = active_trajectory.increment_trajectory_time(
+                            step_ts * controller_state.joystick_command.trajectory_velocity_command, controller_state)
+                        if res:
+                            controller_state.joint_setpoint = setpoint
             elif controller_state.mode == ControllerMode.AUTO_TRAJECTORY:
                 active_trajectory = controller_state.active_trajectory
                 if active_trajectory is not None and active_trajectory.trajectory_valid:
@@ -266,7 +273,11 @@ class Controller(object):
                         controller_state.joint_setpoint = setpoint
             elif controller_state.mode.value >= ControllerMode.EXTERNAL_SETPOINT_0.value \
                 and controller_state.mode.value <= ControllerMode.EXTERNAL_SETPOINT_7.value:
-                pass
+                i = controller_state.mode.value - ControllerMode.EXTERNAL_SETPOINT_0.value
+                setpoint = controller_state.external_joint_setpoints[i]
+                if setpoint is not None:
+                    controller_state.joint_setpoint = np.copy(setpoint)
+                    self._clip_joint_angles(controller_state)                    
             else:
                 self._compute_setpoint_custom_mode(controller_state)
         except:

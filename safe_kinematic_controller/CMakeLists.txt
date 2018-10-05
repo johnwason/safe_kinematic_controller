@@ -52,6 +52,7 @@ add_message_files(
    FILES
    ControllerMode.msg
    ControllerState.msg
+   JointSetpoint.msg
 )
 
 ## Generate services in the 'srv' folder
