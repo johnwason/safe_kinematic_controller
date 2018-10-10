@@ -86,7 +86,10 @@ class ControllerState(object):
         self.joint_command = joint_command
         self.joint_setpoint = joint_setpoint
         self.ft_wrench = ft_wrench
-        self.ft_wrench_status = ft_wrench_status
+        if ft_wrench_status is None:
+            self.ft_wrench_status = ControllerMode.SENSOR_FAULT
+        else:
+            self.ft_wrench_status = ft_wrench_status
         if ft_wrench_bias is None:
             ft_wrench_bias = np.zeros((6,))
         self.ft_wrench_bias = ft_wrench_bias
@@ -242,6 +245,7 @@ class Controller(object):
                         cmd_vel = controller_state.joystick_command.spatial_velocity_command
                         transform_0T = rox.fwdkin(self._robot, controller_state.joint_position)
                         d = np.linalg.norm((transform_0T.p[0], transform_0T.p[1]))
+                        d = np.max(d,0.05)
                         theta = np.arctan2(transform_0T.p[1], transform_0T.p[0])
                         s_0 = transform_0T.p[1] / d
                         c_0 = transform_0T.p[0] / d
