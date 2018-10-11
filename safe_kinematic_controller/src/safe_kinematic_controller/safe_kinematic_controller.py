@@ -40,16 +40,17 @@ import time
 
 class ControllerMode(Enum):
     
-    INVALID_EXTERNAL_SETPOINT = -15
-    FT_THRESHOLD_VIOLATION = -15
-    SENSOR_INVALID_STATE=-14
-    SENSOR_COMMUNICATION_ERROR = -13
-    SENSOR_FAULT = -12
-    COLLISION_IMMINENT = -11
-    TRAJECTORY_ABORTED = -10
-    TRAJECTORY_TRACKING_ERROR = -9
-    INVALID_TRAJECTORY = -8
-    SETPOINT_TRACKING_ERROR = -7
+    INVALID_EXTERNAL_SETPOINT = -17
+    FT_THRESHOLD_VIOLATION = -16
+    SENSOR_INVALID_STATE=-15
+    SENSOR_COMMUNICATION_ERROR = -14
+    SENSOR_FAULT = -13
+    COLLISION_IMMINENT = -12
+    TRAJECTORY_ABORTED = -11
+    TRAJECTORY_TRACKING_ERROR = -10
+    INVALID_TRAJECTORY = -9
+    SETPOINT_TRACKING_ERROR = -8
+    ROBOT_SINGULARITY = -7
     ROBOT_INVALID_STATE = -6
     ROBOT_COMMUNICATION_ERROR = -5
     ROBOT_FAULT = -4
@@ -259,7 +260,43 @@ class Controller(object):
                         self._compute_joint_vel_from_spatial_vel(controller_state, step_ts, cmd_vel2)
                 
             elif controller_state.mode == ControllerMode.SPHERICAL_TELEOP:
-                pass
+                if controller_state.joystick_command is not None \
+                  and controller_state.joystick_command.spatial_velocity_command is not None:
+                    if (not all(self._robot.H[:,0] == (0,0,1)) or self._robot.joint_type[0] != 0):
+                        controller_state.mode = ControllerMode.INVALID_OPERATION
+                    else:
+                        #TODO: more clever solution that doesn't require trigonometry?
+                        cmd_vel = controller_state.joystick_command.spatial_velocity_command
+                        transform_0T = rox.fwdkin(self._robot, controller_state.joint_position)
+                        d = np.linalg.norm(transform_0T.p)
+                        d = np.max(d,0.05)
+                        theta_phi_res = rox.subproblem2(np.dot([1,0,0],d), transform_0T.p, [0,0,1], [0,1,0])
+                        if (len(theta_phi_res) == 0):
+                            controller_state.mode = ControllerMode.ROBOT_SINGULARITY
+                        else:
+                            theta_dot = cmd_vel[3]
+                            phi_dot = cmd_vel[4]
+                            d_dot = cmd_vel[5]
+                            if (len(theta_phi_res) == 1):
+                                theta, phi = theta_phi_res[0]
+                            elif (np.abs(theta_phi_res[0][1]) < np.deg2rad(90)):                                
+                                theta, phi = theta_phi_res[0]
+                            else:
+                                theta, phi = theta_phi_res[1]
+                                                        
+                            s_theta = np.sin(theta)
+                            c_theta = np.cos(theta)
+                            s_phi = np.sin(phi)
+                            c_phi = np.cos(phi)
+                            v_x = -d*s_phi*c_theta*phi_dot -d*s_theta*c_theta*theta_dot + c_phi*c_theta*d_dot
+                            v_y = -d*s_phi*s_theta*phi_dot + d*c_phi*c_theta*theta_dot + s_theta*c_phi*d_dot
+                            v_z = -d*c_phi*phi_dot - s_phi*d_dot                            
+                            w_x = cmd_vel[0] - phi_dot*s_theta
+                            w_y = cmd_vel[1] + phi_dot*c_theta
+                            w_z = cmd_vel[2] + theta_dot
+                            cmd_vel2 = np.array([w_x, w_y, w_z, v_x, v_y, v_z])               
+                            self._compute_joint_vel_from_spatial_vel(controller_state, step_ts, cmd_vel2)
+                    
             elif controller_state.mode == ControllerMode.SHARED_TRAJECTORY:
                 if controller_state.joystick_command is not None \
                   and controller_state.joystick_command.trajectory_velocity_command is not None:
