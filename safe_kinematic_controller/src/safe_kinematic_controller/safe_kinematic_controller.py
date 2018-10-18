@@ -131,6 +131,9 @@ class Controller(object):
     
     def write_robot_command(self, setpoint):
         return ControllerMode.ROBOT_FAULT
+    
+    def write_robot_no_command(self):
+        return ControllerMode.SUCCESS
 
     def read_external_setpoint(self, index):
         return ControllerMode.INVALID_EXTERNAL_SETPOINT, None
@@ -173,6 +176,9 @@ class Controller(object):
             robot_write_res = self.write_robot_command(self._state.joint_command)
             if robot_write_res.value < 0:
                 self._state.mode=robot_write_res
+        else:
+            self.write_robot_no_command()
+        
         self._publish_state(self._state)        
             
     
@@ -186,9 +192,7 @@ class Controller(object):
         
         controller_state.controller_time = self._clock.now
         step_ts = controller_state.ts * controller_state.speed_scalar
-        
-        self._update_active_trajectory(controller_state)
-        
+                        
         if controller_state.mode.value < 0:
             if controller_state.mode == ControllerMode.ROBOT_INVALID_STATE \
                 or controller_state.mode == ControllerMode.ROBOT_COMMUNICATION_ERROR \
@@ -198,7 +202,18 @@ class Controller(object):
                 controller_state.joint_command = None
                                            
             controller_state.ft_wrench = None
+            while True:
+                self._update_active_trajectory(controller_state)
+                if controller_state.active_trajectory is not None:
+                    controller_state.active_trajectory.abort(controller_state.mode)
+                    controller_state.active_trajectory = None
+                else:
+                    break
+                
             return controller_state.mode
+        else:
+            
+            self._update_active_trajectory(controller_state)
         
         if controller_state.joint_setpoint is None:
             controller_state.joint_setpoint = controller_state.joint_position
@@ -304,13 +319,13 @@ class Controller(object):
                     if active_trajectory is not None and active_trajectory.trajectory_valid:
                         res, setpoint = active_trajectory.increment_trajectory_time(
                             step_ts * controller_state.joystick_command.trajectory_velocity_command, controller_state)
-                        if res:
+                        if res == ControllerMode.SUCCESS:
                             controller_state.joint_setpoint = setpoint
             elif controller_state.mode == ControllerMode.AUTO_TRAJECTORY:
                 active_trajectory = controller_state.active_trajectory
                 if active_trajectory is not None and active_trajectory.trajectory_valid:
                     res, setpoint = active_trajectory.increment_trajectory_time(step_ts, controller_state)
-                    if res:
+                    if res == ControllerMode.SUCCESS:
                         controller_state.joint_setpoint = setpoint
             elif controller_state.mode.value >= ControllerMode.EXTERNAL_SETPOINT_0.value \
                 and controller_state.mode.value <= ControllerMode.EXTERNAL_SETPOINT_7.value:
@@ -473,14 +488,18 @@ class JointTrajectory(object):
         if len(plan.waypoints) == 2:
             #Use linear interpolator for 2 points
             for j in xrange(len(self._robot.joint_type)):
+                t1=np.hstack((-10, t, t[-1] + 10))
                 x = np.array([p.positions[j] for p in plan.waypoints])
-                pchip = interp1d(t,x)
+                x1 = np.hstack((x[0], x, x[-1]))
+                pchip = interp1d(t1,x1)
                 interps.append(pchip) 
         else:
             #Use pchip interpolators for three or more points
             for j in xrange(len(self._robot.joint_type)):
+                t1=np.hstack((-10, t, t[-1] + 10))
                 x = np.array([p.positions[j] for p in plan.waypoints])
-                pchip = PchipInterpolator(t,x)
+                x1 = np.hstack((x[0], x, x[-1]))
+                pchip = PchipInterpolator(t1,x1)
                 interps.append(pchip)
                 
         return interps           
@@ -531,14 +550,15 @@ class JointTrajectory(object):
         
         trajectory_angles = self._get_trajectory_joint_angles(t)
         
-        if (np.all(np.abs(controller_state.joint_position - trajectory_angles) > self._plan.path_tolerance.positions)):
-            self.abort(ControllerMode.TRAJECTORY_TRACKING_ERROR, "Trajectory tracking error")
-            return ControllerMode.TRAJECTORY_TRACKING_ERROR, None
-        
         if (t == 0.0):
             if (np.all(np.abs(controller_state.joint_position - trajectory_angles) > self._plan.start_tolerance.positions)):
                 self.abort(ControllerMode.INVALID_TRAJECTORY, "Trajectory tracking error")
                 return ControllerMode.INVALID_TRAJECTORY, None
+        
+        #if (np.all(np.abs(controller_state.joint_position - trajectory_angles) > self._plan.path_tolerance.positions)):
+        #    self.abort(ControllerMode.TRAJECTORY_TRACKING_ERROR, "Trajectory tracking error")
+        #    return ControllerMode.TRAJECTORY_TRACKING_ERROR, None
+        
         
         if t >= self._trajectory_max_t:
             if (np.all(np.abs(controller_state.joint_position - trajectory_angles) < self._plan.goal_tolerance.positions)):

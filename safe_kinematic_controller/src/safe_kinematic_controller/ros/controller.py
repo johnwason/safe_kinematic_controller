@@ -1,6 +1,34 @@
+# Copyright (c) 2017, Rensselaer Polytechnic Institute, Wason Technology LLC
+# All rights reserved.
+# 
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+# 
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#     * Redistributions in binary form must reproduce the above copyright
+#       notice, this list of conditions and the following disclaimer in the
+#       documentation and/or other materials provided with the distribution.
+#     * Neither the name of the Rensselaer Polytechnic Institute, or Wason 
+#       Technology LLC, nor the names of its contributors may be used to 
+#       endorse or promote products derived from this software without 
+#       specific prior written permission.
+# 
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
 from __future__ import absolute_import
 
-from .safe_kinematic_controller import Controller, ControllerMode, JoystickCommand, \
+from ..safe_kinematic_controller import Controller, ControllerMode, JoystickCommand, \
     JointTrajectoryManager, JointTrajectory, JointTrajectoryListener, JointTrajectoryWaypointPlan, \
     JointTrajectoryWaypoint, JointTrajectoryTolerance
 
@@ -12,14 +40,14 @@ import threading
 from std_msgs.msg import Float64
 from general_robotics_toolbox import urdf as rox_urdf
 from urdf_parser_py.urdf import URDF
-from . import msg as safe_kinematic_controller_msg
-from . import srv as safe_kinematic_controller_srv  
+from .. import msg as safe_kinematic_controller_msg
+from .. import srv as safe_kinematic_controller_srv  
 from geometry_msgs.msg import Wrench, Vector3
 from actionlib import action_server
 from control_msgs.msg import FollowJointTrajectoryAction, FollowJointTrajectoryFeedback, FollowJointTrajectoryResult
 from weakref import WeakValueDictionary
 
-class ROSXboxGamepadAdapter(object):
+class ROSXboxGamepadInterface(object):
     
     def __init__(self, n_joints):
         self._lock=threading.Lock()        
@@ -113,17 +141,21 @@ class ROSXboxGamepadAdapter(object):
 
 class ROSController(Controller):
     
-    def __init__(self, robot, ts, clock = None, joint_trajectory_manager = None, joystick_adapter=None):
+    def __init__(self, robot, ts, clock = None, joint_trajectory_manager = None, joystick_interface=None, \
+                 robot_interface = None, ft_sensor_interface = None):
         
         if joint_trajectory_manager is None:
             joint_trajectory_manager = ROSJointTrajectoryManager(robot)
         
         super(ROSController,self).__init__(robot, ts, clock, joint_trajectory_manager = joint_trajectory_manager)
-        if joystick_adapter is not None:
-            self._joystick_adapter = joystick_adapter
+        if joystick_interface is not None:
+            self._joystick_interface = joystick_interface
         else:
-            self._joystick_adapter = ROSXboxGamepadAdapter(len(robot.joint_type))
-            
+            self._joystick_interface = ROSXboxGamepadInterface(len(robot.joint_type))
+        
+        self._robot_interface = robot_interface
+        self._ft_sensor_interface = ft_sensor_interface
+        
         self._joint_state_subscriber = None
         self._joint_command_publishers = []
         self._ft_wrench_subscriber = None
@@ -136,7 +168,7 @@ class ROSController(Controller):
         
         
         self._init_read_robot_state()
-        self._init_write_robot_state()
+        self._init_write_robot_command()
         self._init_read_ft_sensor()
         self._init_read_external_setpoints()
         self._init_publish_state()
@@ -144,7 +176,10 @@ class ROSController(Controller):
         self._set_controller_mode_service=rospy.Service("set_controller_mode", safe_kinematic_controller_srv.SetControllerMode, self._set_controller_mode_cb)
                             
     def _init_read_robot_state(self):
-        self._joint_state_subscriber=rospy.Subscriber("joint_states", JointState, self._joint_states_cb)
+        if self._robot_interface is not None:
+            self._robot_interface.init_read_robot_state()
+        else:
+            self._joint_state_subscriber=rospy.Subscriber("joint_states", JointState, self._joint_states_cb)
     
     def _joint_states_cb(self, joint_states):
         
@@ -153,10 +188,13 @@ class ROSController(Controller):
                 j = joint_states.name.index(self._robot.joint_names[i])            
                 self._joint_states_position[i] = joint_states.position[j] 
     
-    def _init_write_robot_state(self):
-        for j in self._robot.joint_names:
-            pub = rospy.Publisher(j + "_position_controller/command", Float64, queue_size=10)
-            self._joint_command_publishers.append(pub)
+    def _init_write_robot_command(self):
+        if self._robot_interface is not None:
+            self._robot_interface.init_write_robot_command()
+        else:
+            for j in self._robot.joint_names:
+                pub = rospy.Publisher(j + "_position_controller/command", Float64, queue_size=10)
+                self._joint_command_publishers.append(pub)
     
     def _ft_wrench_cb(self, ft_wrench):
         #TODO: Add reading timeout?
@@ -166,7 +204,10 @@ class ROSController(Controller):
             self._ft_wrench = np.array([t.x, t.y, t.z, f.x, f.y, f.z])
     
     def _init_read_ft_sensor(self):
-        self._ft_wrench_subscriber = rospy.Subscriber("ft_wrench", WrenchStamped, self._ft_wrench_cb)
+        if self._ft_sensor_interface is not None:
+            self._ft_sensor_interface.init_read_ft_sensor()
+        else:
+            self._ft_wrench_subscriber = rospy.Subscriber("ft_wrench", WrenchStamped, self._ft_wrench_cb)
     
     def _external_setpoint_cb(self, i, joint_setpoint):
         if joint_setpoint.names == self._robot.joint_names and len(joint_setpoint.position) == len(self._robot.joint_names):
@@ -182,20 +223,34 @@ class ROSController(Controller):
         self._publish_state_publisher = rospy.Publisher("controller_state", safe_kinematic_controller_msg.ControllerState, queue_size=10)
         
     def read_robot_joint_position(self):
+        if self._robot_interface is not None:
+            return self._robot_interface.read_robot_joint_position()
         p = np.copy(self._joint_states_position)
         if any(np.isnan(p)):
             return ControllerMode.ROBOT_COMMUNICATION_ERROR, None
         return ControllerMode.SUCCESS, p        
     
     def write_robot_command(self, setpoint):
-        for i in xrange(len(self._joint_command_publishers)):
-            self._joint_command_publishers[i].publish(Float64(setpoint[i]))
-        return ControllerMode.SUCCESS
+        if self._robot_interface is not None:
+            return self._robot_interface.write_robot_command(setpoint)
+        else:
+            for i in xrange(len(self._joint_command_publishers)):
+                self._joint_command_publishers[i].publish(Float64(setpoint[i]))
+            return ControllerMode.SUCCESS
+    
+    def write_robot_no_command(self):
+        if self._robot_interface is not None:
+            return self._robot_interface.write_robot_no_command()
+        else:
+            return ControllerMode.SUCCESS
         
+    
     def read_joystick_command(self):
-        return self._joystick_adapter.read_joystick_command()
+        return self._joystick_interface.read_joystick_command()
     
     def read_ft_wrench(self):
+        if self._ft_sensor_interface is not None:
+            return self._ft_sensor_interface.read_ft_wrench()
         if self._ft_wrench is None:
             return ControllerMode.SENSOR_COMMUNICATION_ERROR, None
         return ControllerMode.SUCCESS, self._ft_wrench
@@ -277,13 +332,22 @@ class ROSController(Controller):
     
 class ROSJointTrajectoryListener():
     def __init__(self, gh):
+        self._lock = threading.Lock()
         self.gh = gh
         
     def aborted(self, trajectory, trajectory_time, error_code, error_string):
-        self.gh.set_aborted(text=error_string)
+        with self._lock:
+            if self.gh is None:
+                return
+            self.gh.set_aborted(text=error_string)
+            self.gh = None
     
     def completed(self, trajectory, trajectory_time):
-        self.gh.set_succeeded()
+        with self._lock:
+            if self.gh is None:
+                return
+            self.gh.set_succeeded()
+            self.gh=None
         
     def setpoint_updated(self, trajectory, trajectory_time, joint_command, controller_state):
         pass
@@ -292,7 +356,7 @@ class ROSJointTrajectoryListener():
 
 class ROSJointTrajectoryManager(JointTrajectoryManager):
     
-    def __init__(self, robot, trajectory_type=JointTrajectory, default_tolerance = 0.01):
+    def __init__(self, robot, trajectory_type=JointTrajectory, default_tolerance = 0.001):
         super(ROSJointTrajectoryManager,self).__init__(robot, trajectory_type)
 
         assert trajectory_type is not None
@@ -355,6 +419,7 @@ class ROSJointTrajectoryManager(JointTrajectoryManager):
                 return
             
             
+            
             w = JointTrajectoryWaypoint(time_from_start, positions, velocities, accelerations, effort)
             
             waypoints.append(w)
@@ -414,22 +479,22 @@ class ROSJointTrajectoryManager(JointTrajectoryManager):
             trajectory = self._gh_trajectory[gh]
             trajectory.abort()
         except KeyError: pass
-            
+
+def main(robot_interface=None, ft_sensor_interface=None):
     
-def main():
-    
-    rospy.init_node("safe_kinematic_controller")
+    if not rospy.core.is_initialized():
+        rospy.init_node("safe_kinematic_controller")
     
     print rospy.get_param_names()
     
     robot_root_link = rospy.get_param("~robot_root_link", None)
     robot_tip_link = rospy.get_param("~robot_tip_link", None)
     
-    rate_hz = rospy.get_param("~publish_rate", 250.0)
+    rate_hz = rospy.get_param("~publish_frequency", 250.0)
     
     robot = rox_urdf.robot_from_parameter_server(root_link = robot_root_link, tip_link = robot_tip_link)
         
-    controller = ROSController(robot, 1.0/rate_hz)
+    controller = ROSController(robot, 1.0/rate_hz, robot_interface=robot_interface, ft_sensor_interface=ft_sensor_interface)
     
     rate = rospy.Rate(rate_hz)
     
