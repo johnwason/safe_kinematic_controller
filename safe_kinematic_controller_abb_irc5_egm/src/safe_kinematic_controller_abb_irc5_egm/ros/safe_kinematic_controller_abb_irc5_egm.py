@@ -119,9 +119,9 @@ def main():
     joint_names = rospy.get_param('controller_joint_names')
     robot_interface=EGMRobotInterface(joint_names, egm_local_port=egm_local_port, egm_recv_timeout = egm_recv_timeout)
     
-    netft_host=rospy.get_param("~netft_host", None)
+    netft_host=rospy.get_param("~netft_host", None)    
     netft = None
-    if netft_host is not None:
+    if netft_host is not None and len(netft_host) != 0:
         netft = FTSensorInterface(netft_host)        
 
     ros_main(robot_interface=robot_interface, ft_sensor_interface= netft)
