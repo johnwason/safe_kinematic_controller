@@ -174,6 +174,7 @@ class ROSController(Controller):
         self._init_publish_state()
         
         self._set_controller_mode_service=rospy.Service("set_controller_mode", safe_kinematic_controller_srv.SetControllerMode, self._set_controller_mode_cb)
+        self._get_controller_state_service=rospy.Service("get_controller_state", safe_kinematic_controller_srv.GetControllerState, self._get_controller_state_cb)
                             
     def _init_read_robot_state(self):
         if self._robot_interface is not None:
@@ -263,29 +264,40 @@ class ROSController(Controller):
     
     def _publish_state(self, state):
         
+        if self._publish_state_publisher is not None:
+            s = self._fill_controller_state_msg(state)
+            self._publish_state_publisher.publish(s)
+    
+    def _fill_controller_state_msg(self, state):
+        
         def vector2wrench(v):
             if v is None:
                 return Wrench(Vector3(0,0,0), Vector3(0,0,0))
             return Wrench(Vector3(v[3], v[4], v[5]), Vector3(v[0], v[1], v[2]))
-        
-        if self._publish_state_publisher is not None:
-            s = safe_kinematic_controller_msg.ControllerState()
-            s.header.stamp = rospy.Time.now()
-            s.mode.mode = state.mode.value
-            s.joint_name = self._robot.joint_names
-            s.joint_position = list(state.joint_position) if state.joint_position is not None else []
-            s.joint_setpoint_position = list(state.joint_setpoint) if state.joint_setpoint is not None else []
-            s.joint_command_position = list(state.joint_command) if state.joint_command is not None else []
-            s.ft_wrench = vector2wrench(state.ft_wrench)
-            s.ft_wrench_valid = state.ft_wrench_status.value > 0
-            s.ft_wrench_bias = vector2wrench(state.ft_wrench_bias)
-            if state.active_trajectory is not None:
-                s.trajectory_valid = True
-                s.trajectory_time = state.active_trajectory.trajectory_time
-                s.trajectory_max_time = state.active_trajectory.trajectory_max_time
                 
-            self._publish_state_publisher.publish(s)
+        s = safe_kinematic_controller_msg.ControllerState()
+        s.header.stamp = rospy.Time.now()
+        s.mode.mode = state.mode.value
+        s.joint_name = self._robot.joint_names
+        s.joint_position = list(state.joint_position) if state.joint_position is not None else []
+        s.joint_setpoint_position = list(state.joint_setpoint) if state.joint_setpoint is not None else []
+        s.joint_command_position = list(state.joint_command) if state.joint_command is not None else []
+        s.ft_wrench = vector2wrench(state.ft_wrench)
+        s.ft_wrench_valid = state.ft_wrench_status.value > 0
+        s.ft_wrench_bias = vector2wrench(state.ft_wrench_bias)
+        if state.active_trajectory is not None:
+            s.trajectory_valid = True
+            s.trajectory_time = state.active_trajectory.trajectory_time
+            s.trajectory_max_time = state.active_trajectory.trajectory_max_time
+        return s
     
+    def _get_controller_state_cb(self, req):
+        with self._lock:
+            res = safe_kinematic_controller_srv.GetControllerStateResponse()
+            res.state = self._fill_controller_state_msg(self._state)
+            res.error_code.mode=ControllerMode.SUCCESS.value
+            return res
+      
     def _set_controller_mode_cb(self, req):
         with self._lock:
             res = safe_kinematic_controller_srv.SetControllerModeResponse()
