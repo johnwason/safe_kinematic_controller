@@ -32,6 +32,7 @@ from safe_kinematic_controller import ControllerMode
 from rpi_abb_irc5 import EGM
 from rpi_ati_net_ft import NET_FT
 from sensor_msgs.msg import JointState 
+from rpi_ati_net_ft import NET_FT
 
 class EGMRobotInterface(object):
     def __init__(self, joint_names, egm_local_port = 6510, egm_recv_timeout = 0.0015 ):
@@ -93,6 +94,23 @@ class EGMRobotInterface(object):
         js.effort = [0,0,0,0,0,0]
         return js
 
+class FTSensorInterface(object):
+   def __init__(self, netft_host):
+       self._net_ft_host = netft_host
+
+   def init_read_ft_sensor(self):
+       self._net_ft = NET_FT(self._net_ft_host)
+       self._net_ft.set_tare_from_ft()
+       self._net_ft.start_streaming()
+
+   def read_ft_wrench(self):
+       ft_res, ft1, ft_status_code= self._net_ft.try_read_ft_streaming(0)
+       if ft_res and ft_status_code == 0:
+           return ControllerMode.SUCCESS, ft1
+       else:
+           return ControllerMode.SENSOR_FAULT, None
+   
+
 def main():
     rospy.init_node("safe_kinematic_controller_abb_irc5_egm")
     
@@ -101,5 +119,10 @@ def main():
     joint_names = rospy.get_param('controller_joint_names')
     robot_interface=EGMRobotInterface(joint_names, egm_local_port=egm_local_port, egm_recv_timeout = egm_recv_timeout)
     
-    ros_main(robot_interface=robot_interface)
+    netft_host=rospy.get_param("~netft_host", None)
+    netft = None
+    if netft_host is not None:
+        netft = FTSensorInterface(netft_host)        
+
+    ros_main(robot_interface=robot_interface, ft_sensor_interface= netft)
     
