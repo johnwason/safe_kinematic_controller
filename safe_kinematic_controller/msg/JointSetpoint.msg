@@ -1,3 +1,3 @@
 Header header
-string[] names
+string[] name
 float64[] position

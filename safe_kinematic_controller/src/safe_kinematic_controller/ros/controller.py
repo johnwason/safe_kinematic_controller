@@ -211,7 +211,7 @@ class ROSController(Controller):
             self._ft_wrench_subscriber = rospy.Subscriber("ft_wrench", WrenchStamped, self._ft_wrench_cb)
     
     def _external_setpoint_cb(self, i, joint_setpoint):
-        if joint_setpoint.names == self._robot.joint_names and len(joint_setpoint.position) == len(self._robot.joint_names):
+        if joint_setpoint.name == self._robot.joint_names and len(joint_setpoint.position) == len(self._robot.joint_names):
             with self._lock:
                 self._external_setpoint[i] = joint_setpoint.position
     
