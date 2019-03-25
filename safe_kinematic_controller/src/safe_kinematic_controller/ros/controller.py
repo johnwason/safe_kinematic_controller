@@ -454,7 +454,7 @@ class ROSJointTrajectoryManager(JointTrajectoryManager):
             velocities = np.zeros((n_joints,))
             accelerations = np.zeros((n_joints,))
             
-            for i in n_joints:
+            for i in xrange(n_joints):
                 if ros_tolerance[i].name != self._robot.joint_names[i]:
                     rospy.logerr("Invalid joint tolerance in trajectory")
                     return

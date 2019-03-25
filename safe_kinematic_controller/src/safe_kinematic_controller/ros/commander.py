@@ -31,7 +31,6 @@ import sys
 import rospy
 import numpy as np
 
-import moveit_commander
 import general_robotics_toolbox as rox
 import general_robotics_toolbox.urdf as rox_urdf
 import general_robotics_toolbox.ros_msg as rox_msg
@@ -43,10 +42,10 @@ from ..msg import \
     ControllerMode, ControllerState
 
 from geometry_msgs.msg import PoseStamped, Pose
-
-from moveit_msgs.srv import GetPositionIK, GetPositionIKRequest, GetPlanningScene, GetPlanningSceneRequest
-from moveit_msgs.msg import PositionIKRequest, PlanningSceneComponents, MoveItErrorCodes, \
-    JointConstraint
+from control_msgs.msg import FollowJointTrajectoryAction, FollowJointTrajectoryGoal, \
+      JointTolerance
+import actionlib
+from sensor_msgs.msg import JointState
 
 class ControllerCommander(object):
     
@@ -85,20 +84,8 @@ class ControllerCommander(object):
     MODE_CUSTOM_MODE_0 = ControllerMode.MODE_CUSTOM_MODE_0
     MODE_SUCCESS = ControllerMode.MODE_SUCCESS
     
-    def __init__(self, arm_controller_ns = "", move_group = "move_group", goal_position_tolerance = 0.04, planning_time = 30, rox_robot = None ):
-        
-        moveit_commander.roscpp_initialize(sys.argv)
-        
-        self.moveit_robot = moveit_commander.RobotCommander()
-        self.moveit_scene = moveit_commander.PlanningSceneInterface()
-        if isinstance(move_group, basestring):
-            self.moveit_group = moveit_commander.MoveGroupCommander(move_group)
-            self.moveit_group.set_goal_position_tolerance(goal_position_tolerance)
-            self.moveit_group.allow_replanning(True)
-            self.moveit_group.set_planning_time(planning_time)
-        else:
-            self.moveit_group = move_group
-        
+    def __init__(self, arm_controller_ns = "", rox_robot = None ):
+                                        
         if isinstance(rox_robot, rox.Robot):
             self.rox_robot = rox_robot
         elif isinstance(rox_robot, basestring):
@@ -111,8 +98,9 @@ class ControllerCommander(object):
         set_controller_mode_name = rospy.names.ns_join(arm_controller_ns, "set_controller_mode")        
         self._set_controller_mode=rospy.ServiceProxy(set_controller_mode_name, SetControllerMode)
         self._arm_controller_ns = arm_controller_ns
-        self._get_planning_scene = rospy.ServiceProxy("get_planning_scene",GetPlanningScene)        
-        self._compute_ik = rospy.ServiceProxy("compute_ik",GetPositionIK)
+        joint_trajectory_action_name = rospy.names.ns_join(arm_controller_ns, "joint_trajectory_action")
+        self.joint_trajectory_action=actionlib.SimpleActionClient(joint_trajectory_action_name,FollowJointTrajectoryAction)
+        self.controller_state_name = rospy.names.ns_join(arm_controller_ns, "controller_state")
         
     def set_controller_mode(self, mode, speed_scalar=1.0, ft_bias=[], ft_threshold=[]):
         req=SetControllerModeRequest()
@@ -127,151 +115,81 @@ class ControllerCommander(object):
     def subscribe_controller_state(self, cb):
         controller_state_name = rospy.names.ns_join(self.arm_controller_ns, "controller_state")
         return rospy.Subscriber(controller_state_name, ControllerState, cb)
-    
-    def compute_ik(self, pose):
-                            
-        if isinstance(pose, rox.Transform):
-            pose = rox_msg.transform2pose_stamped_msg(pose)
-        
-        assert isinstance(pose, PoseStamped)
-        
-        if pose.header.frame_id is None or pose.header.frame_id == "":
-            pose.header.frame_id = "world"
-        
-        get_planning_scene_req = GetPlanningSceneRequest()
-        get_planning_scene_req.components.components = PlanningSceneComponents.ROBOT_STATE
-        get_planning_scene_res = self._get_planning_scene(get_planning_scene_req)
-        robot_state_start = get_planning_scene_res.scene.robot_state
-                
-        ik_request=PositionIKRequest()
-        ik_request.group_name = self.moveit_group.get_name()
-        ik_request.robot_state = robot_state_start
-        ik_request.avoid_collisions = True
-        ik_request.timeout = rospy.Duration(30.0)
-        ik_request.pose_stamped = pose
-        ik_request.ik_link_name = self.moveit_group.get_end_effector_link()
-        
-        for i in xrange(len(robot_state_start.joint_state.name)):
-            j = JointConstraint()
-            j.joint_name = robot_state_start.joint_state.name[i]
-            j.position = robot_state_start.joint_state.position[i]
-            j.tolerance_above = np.deg2rad(170)
-            j.tolerance_below = np.deg2rad(170)
-            j.weight=100
                     
-            ik_request.constraints.joint_constraints.append(j)
-        
-        ik_request_req = GetPositionIKRequest(ik_request)
-        ik_request_res = self._compute_ik(ik_request_req)
-        
-        if (ik_request_res.error_code.val != MoveItErrorCodes.SUCCESS):
-            raise Exception("Could not compute inverse kinematics")
-        
-        return ik_request_res.solution.joint_state.position
-            
     def compute_fk(self, joint = None):
         
         if joint is None:
-            joint=self.moveit_group.get_current_joint_values()
+            joint=self.get_current_joint_values()
         
         return rox.fwdkin(self.rox_robot, joint)
     
-    def get_current_joint_values(self):
-        return self.moveit_group.get_current_joint_values()
+    def get_current_joint_values(self, timeout=1):
+        joint_state_msg=rospy.wait_for_message("joint_states", JointState, timeout)
+        res = np.zeros((len(self.rox_robot.joint_names),),dtype=np.float64)
+        for i in xrange(len(res)):
+            j = joint_state_msg.name.index(self.rox_robot.joint_names[i])
+            res[i] = joint_state_msg.position[j] 
+        return res
     
     def get_current_pose_msg(self):
-        return self.moveit_group.get_current_pose()
+        return self.compute_fk()        
+    
+    def _fill_joint_trajectory_action_goal(self, joint_trajectory, path_tolerance, goal_tolerance, goal_time_tolerance):
+        n_joints = len(self.rox_robot.joint_names)
+        if not isinstance(path_tolerance, list):
+            path_tolerance1 = []
+            for n in self.rox_robot.joint_names:
+                path_tolerance1.append(JointTolerance(n, path_tolerance, 0, 0))
+            path_tolerance = path_tolerance1
+        
+        if not isinstance(goal_tolerance, list):
+            goal_tolerance1 = []
+            for n in self.rox_robot.joint_names:
+                goal_tolerance1.append(JointTolerance(n, goal_tolerance, 0, 0))
+            goal_tolerance = goal_tolerance1
+        
+        if not isinstance(goal_time_tolerance, rospy.Duration):
+            goal_time_tolerance = rospy.Duration(goal_time_tolerance)
+        
+        return FollowJointTrajectoryGoal(joint_trajectory, path_tolerance, goal_tolerance, goal_time_tolerance)
             
-    def plan(self, pose_target):
+    def execute_trajectory(self, joint_trajectory, path_tolerance = 0.01, goal_tolerance = 0.04, goal_time_tolerance = 0.5, \
+                            execute_timeout = rospy.Duration(30), preempt_timeout = rospy.Duration(5), 
+                            ft_stop = False):
         
-        joint_target=self.compute_ik(pose_target)
-        return self.plan_joint_target(joint_target)
-    
-    def plan_joint_target(self, joint_target):
+        goal = self._fill_joint_trajectory_action_goal(joint_trajectory, path_tolerance, goal_tolerance, goal_time_tolerance)
         
-        self.moveit_group.set_joint_value_target(joint_target)
+        res = self.joint_trajectory_action.send_goal_and_wait(goal, execute_timeout, preempt_timeout)
         
-        plan1 = self.moveit_group.plan()        
-        cnt = 0
-        while( (not plan1.joint_trajectory.points) and (cnt<3)):
-            if rospy.is_shutdown():
-                raise Exception("Node shutdown")            
-            plan1 = self.moveit_group.plan()
-            cnt = cnt+1
+        if res != actionlib.GoalStatus.SUCCEEDED:
+           
+            if not ft_stop:
+                raise Exception("Trajectory execution failed")
+            msg = rospy.wait_for_message(self.controller_state_name, ControllerState)
+            if msg.mode.mode == self.MODE_FT_THRESHOLD_VIOLATION:
+                return
+            raise Exception("Trajectory execution failed")
         
-        if (not plan1.joint_trajectory.points):
-            raise Exception("Planning failed")
-        
-        return plan1
-    
-    def execute(self, plan):
-        if rospy.is_shutdown():
-            raise Exception("Node shutdown")
-        res = self.moveit_group.execute(plan)
-        if not res:
-            raise Exception("Path execution failed")
-    
-    def async_execute(self, plan, result_cb):
-                
-        self._async_execute_func(lambda: self.execute(plan), result_cb)   
-    
-    def plan_and_move(self, pose_target):
-        plan1=self.plan(pose_target)
-        self.execute(plan1)
-    
-    def plan_joint_target_and_move(self, joint_target):
-        plan1=self.plan_joint_target(joint_target)
-        self.execute(plan1)
-    
-    def async_plan_and_move(self, pose_target, result_cb):                
-        
-        self._async_execute_func(lambda: self.plan_and_move(pose_target), result_cb)             
-    
-    def async_plan_joint_target_and_move(self, joint_target, result_cb):                
-        
-        self._async_execute_func(lambda: self.plan_joint_target_and_move(joint_target), result_cb)             
-    
-    
-    def compute_cartesian_path(self, pose_target, jump_threshold=0.01, eef_step=0.0, avoid_collisions=True):
-        
-        if isinstance(pose_target, PoseStamped):
-            pose_target=pose_target.pose
-        elif isinstance(pose_target,rox.Transform):
-            pose_target=rox_msg.transform2pose_msg(pose_target)
+    def async_execute_trajectory(self, joint_trajectory, done_cb, path_tolerance = 0.01, goal_tolerance = 0.04, goal_time_tolerance = 0.5, \
+                            execute_timeout = rospy.Duration(30), preempt_timeout = rospy.Duration(5), 
+                            ft_stop = False):
+                        
+        def action_done(status, result):
+            if status == actionlib.GoalStatus.SUCCEEDED:
+                done_cb(None)
+                return
+           
+            if not ft_stop:
+                done_cb("Trajectory execution failed")
+                return
+            msg = rospy.wait_for_message(self.controller_state_name, ControllerState)
+            if msg.mode.mode == self.MODE_FT_THRESHOLD_VIOLATION:
+                done_cb(None)
+                return
+            done_cb(Exception("Trajectory execution failed"))
             
-        (path, fraction) = self.moveit_group.compute_cartesian_path([pose_target], jump_threshold,\
-                                                                    eef_step, avoid_collisions)
-        
-        if (fraction < 0.9999):
-            raise Exception("Could not compute cartesian path")
-        
-        return path
-    
-    def compute_cartesian_path_and_move(self, pose_target, jump_threshold=0.01, eef_step=0.0, avoid_collisions=True):
-        plan=self.compute_cartesian_path(pose_target, jump_threshold, eef_step, avoid_collisions)
-        self.execute(plan)
-    
-    def async_compute_cartesion_path_and_move(self, pose_target, result_cb, jump_threshold=0.01, eef_step=0.0, avoid_collisions=True):                
-        
-        self._async_execute_func(lambda: self.compute_cartesian_path_and_move(pose_target, jump_threshold, \
-                                                                              eef_step, avoid_collisions), result_cb)             
-        
-    def _async_execute_func(self, f, result_cb):
-        lock=threading.Lock()
-        def t():
-            with lock:
-                exp=None                
-                try:
-                    f()
-                except Exception as exp1:
-                    exp=exp1
-                    
-                result_cb(exp)
-        
-        with lock:
-            thread=threading.Thread(target = t)
-            thread.daemon=True
-            thread.start()
-    
-    def stop_move(self):
-        self.moveit_group.stop()
+        goal = self._fill_joint_trajectory_action_goal(joint_trajectory, path_tolerance, goal_tolerance, goal_time_tolerance)   
+        self.joint_trajectory_action.send_goal(goal, done_cb = action_done)
+            
+    def stop_trajectory(self):
+        self.joint_trajectory_action.cancel_all_goals()

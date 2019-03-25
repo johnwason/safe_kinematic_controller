@@ -75,6 +75,23 @@ class ControllerMode(Enum):
     CUSTOM_MODE_0 = 0xFFFF
     SUCCESS = 0x7FFFFFFF
 
+class QuadProg(object):
+    def __init__(self, robot):
+        self._robot=robot
+        self._lock=threading.Lock()
+        self._collision_report=None
+        
+    def compute_quadprog(self, state):
+        with self._lock:
+            joint_command=do_my_computation(self._robot, state.joint_position)
+            return joint_command
+    
+    def collision_cb(self, msg):
+        with self._lock:
+            self._collision_report=msg
+            
+
+
 class ControllerState(object):
     def __init__(self, controller_time=0, ts=0, mode=ControllerMode.HALT, error_msg=None, joint_position=None, joint_setpoint=None, \
                   joint_command=None, ft_wrench=None, ft_wrench_status=None, ft_wrench_bias = None, ft_wrench_threshold=None,\
@@ -122,6 +139,7 @@ class Controller(object):
         
         self._state = ControllerState(controller_time = self._clock.now(), ts=ts)
         self._joint_trajectory_manager = joint_trajectory_manager
+        self._quadprog=QuadProg(self._robot)
 
     def read_robot_joint_position(self):
         return ControllerMode.ROBOT_FAULT, None 
@@ -343,6 +361,7 @@ class Controller(object):
         
         #TODO: add in joint command filter
         controller_state.joint_command = controller_state.joint_setpoint
+        #controller_state.joint_command = self._quadprog.compute_quadprog(controller_state)
         
         return controller_state.mode 
     
