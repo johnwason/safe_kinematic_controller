@@ -153,7 +153,7 @@ class ControllerCommander(object):
         
         return FollowJointTrajectoryGoal(joint_trajectory, path_tolerance, goal_tolerance, goal_time_tolerance)
             
-    def execute_trajectory(self, joint_trajectory, path_tolerance = 0.01, goal_tolerance = 0.04, goal_time_tolerance = 0.5, \
+    def execute_trajectory(self, joint_trajectory, path_tolerance = 0.005, goal_tolerance = 0.001, goal_time_tolerance = 0.5, \
                             execute_timeout = rospy.Duration(30), preempt_timeout = rospy.Duration(5), 
                             ft_stop = False):
         
